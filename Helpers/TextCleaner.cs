@@ -1,11 +1,5 @@
 ﻿namespace WebParser.Helpers;
 
-using HtmlAgilityPack; // Не забудьте додати цей using
-using System;
-using System.Linq;   // Для .Where, .ToList(), .ForEach
-using System.Net;    // Для WebUtility.HtmlDecode
-using System.Text.RegularExpressions; // Для нормалізації пробілів
-
 public static class TextCleaner
 {
     /// <summary>

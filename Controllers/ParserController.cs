@@ -7,10 +7,14 @@ public class ParserController : ControllerBase
     private static readonly HttpClient _httpClient = new HttpClient();
     private readonly HashSet<string> _visitedUrls = new HashSet<string>();
     private readonly ILogger<ParserController> _logger;
-    const string UrlPattern = @"^(?:https?:\/\/(?:www\.)?(?:[a-zA-Z0-9-]+\.)*?([a-zA-Z0-9-]+)\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})*(?:\/.*)?)$";
+    string DomainNamePattern => _configuration?.GetValue<string>("FilterSettings:DomainNamePattern")??"";
+    Regex urlDomainRegex;
+    private readonly IConfiguration _configuration;
 
-    public ParserController(ILogger<ParserController> logger)
+    public ParserController(IConfiguration configuration, ILogger<ParserController> logger)
     {
+        urlDomainRegex = new Regex(DomainNamePattern, RegexOptions.IgnoreCase);
+        _configuration = configuration;
         _logger = logger;
     }
 
@@ -31,7 +35,7 @@ public class ParserController : ControllerBase
         [FromQuery] IEnumerable<string> urls,
         [FromQuery] string? webhookUrl = null) // <--- Додано опціональний параметр webhookUrl
     {
-        Regex urlDomainRegex = new Regex(UrlPattern, RegexOptions.IgnoreCase);
+        //Regex urlDomainRegex = new Regex(UrlPattern, RegexOptions.IgnoreCase);
 
         _logger.LogInformation("Отримано запит на парсинг URL-адрес: {Urls}", string.Join(", ", urls));
         if (!string.IsNullOrEmpty(webhookUrl))
@@ -91,8 +95,9 @@ public class ParserController : ControllerBase
         Uri currentUri;
         bool isWebhookUrlProvided = !string.IsNullOrEmpty(webhookUrl);
         bool isMatchValueProvided = !string.IsNullOrEmpty(matchValue);
-        Regex urlDomainRegex = new Regex(UrlPattern, RegexOptions.IgnoreCase);
+        //Regex urlDomainRegex = new Regex(UrlPattern, RegexOptions.IgnoreCase);
         var domainName = urlDomainRegex.Matches(url).FirstOrDefault()?.Groups[1]?.Value;
+        bool isDomainNameProvided = !string.IsNullOrEmpty(domainName);
 
         if (!Uri.TryCreate(url, UriKind.Absolute, out currentUri))
         {
@@ -117,7 +122,7 @@ public class ParserController : ControllerBase
 
         Link currentLink = new Link { Url = normalizedUrl }; // Створюємо Link для поточної сторінки
         
-        if (isMatchValueProvided && matchValue != domainName)
+        if (isMatchValueProvided && isDomainNameProvided && matchValue != domainName)
         {
             _logger.LogInformation($"URL {normalizedUrl} не містить matchValue {matchValue}. Пропуск.", normalizedUrl, matchValue);
             currentLink.Data = "Посилання на додаткові ресурти";
