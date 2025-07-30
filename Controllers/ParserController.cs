@@ -13,8 +13,8 @@ public class ParserController : ControllerBase
 
     public ParserController(IConfiguration configuration, ILogger<ParserController> logger)
     {
-        urlDomainRegex = new Regex(DomainNamePattern, RegexOptions.IgnoreCase);
         _configuration = configuration;
+        urlDomainRegex = new Regex(DomainNamePattern, RegexOptions.IgnoreCase);
         _logger = logger;
     }
 
