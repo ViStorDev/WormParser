@@ -9,3 +9,5 @@ global using HtmlAgilityPack; // Не забудьте додати цей using
 global using System;
 global using System.Linq;   // Для .Where, .ToList(), .ForEach
 global using System.Net;    // Для WebUtility.HtmlDecode
+global using System.Collections.Concurrent;
+

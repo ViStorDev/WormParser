@@ -10,7 +10,6 @@ public class ParserController : ControllerBase
     private readonly IConfiguration _configuration;
 
     // Обмежувач паралельних запитів для запобігання перевантаженню.
-    // За замовчуванням дозволяє 10 одночасних запитів.
     private static SemaphoreSlim _semaphore;
 
     private string DomainNamePattern => _configuration?.GetValue<string>("FilterSettings:DomainNamePattern") ?? "";
@@ -19,8 +18,6 @@ public class ParserController : ControllerBase
     {
         _configuration = configuration;
         _logger = logger;
-        // Створення Regex об'єкта в конструкторі, щоб уникнути перевитрат ресурсів
-        // при кожному запиті.
         _semaphore = new SemaphoreSlim(10, _configuration?.GetValue<int>("ParallelExecutions:MaxNumber") ?? 10);
         _urlDomainRegex = new Regex(DomainNamePattern, RegexOptions.IgnoreCase);
     }
@@ -31,10 +28,10 @@ public class ParserController : ControllerBase
     [HttpGet("siteSummary")]
     public async Task<IActionResult> Get(
         [FromQuery] IEnumerable<string> urls,
-        [FromQuery] string? webhookUrl = null)
+        [FromQuery] string? webhookUrl = null,
+        [FromQuery] int maxLinks = 0) // новий параметр для обмеження кількості посилань
     {
         _logger.LogInformation("Отримано запит на парсинг URL-адрес: {Urls}", string.Join(", ", urls));
-
         if (!string.IsNullOrEmpty(webhookUrl))
         {
             _logger.LogInformation("Webhook URL для відправки Link об'єктів: {WebhookUrl}", webhookUrl);
@@ -43,38 +40,39 @@ public class ParserController : ControllerBase
         var summaries = new List<SiteSummary>();
         var visitedUrls = new HashSet<string>();
 
-        // Створюємо список завдань, щоб обробляти початкові URL паралельно.
         var tasks = new List<Task>();
 
         foreach (var url in urls)
         {
             tasks.Add(Task.Run(async () =>
             {
-                // Зачекати, поки не звільниться слот в семафорі.
                 await _semaphore.WaitAsync();
                 try
                 {
+                    // Перевірка валідності стартового URL
+                    if (!Uri.TryCreate(url, UriKind.Absolute, out var _))
+                    {
+                        _logger.LogWarning("Недійсний стартовий URL: {Url}", url);
+                        return; // недійсні URL пропускаються
+                    }
+
                     var matchValue = _urlDomainRegex.Matches(url).FirstOrDefault()?.Groups[1].Value;
                     var summ = new SiteSummary { Url = url };
 
-                    // Викликаємо рекурсивну функцію для обробки сайту.
-                    await GetSiteSummaryRecursive(url, summ, visitedUrls, webhookUrl, matchValue);
+                    await GetSiteSummaryRecursive(url, summ, visitedUrls, webhookUrl, matchValue, maxLinks);
 
                     if (string.IsNullOrEmpty(webhookUrl))
                     {
-                        // Додаємо зведення, тільки якщо не використовуємо вебхук.
                         summaries.Add(summ);
                     }
                 }
                 finally
                 {
-                    // Звільняємо слот, щоб інше завдання могло виконуватися.
                     _semaphore.Release();
                 }
             }));
         }
 
-        // Чекаємо, поки всі початкові завдання (для кожного URL з вхідного списку) будуть завершені.
         await Task.WhenAll(tasks);
 
         if (!string.IsNullOrEmpty(webhookUrl))
@@ -89,22 +87,28 @@ public class ParserController : ControllerBase
         }
     }
 
-    private async Task GetSiteSummaryRecursive(string url, SiteSummary summ, HashSet<string> visitedUrls, string? webhookUrl, string? matchValue)
+    private async Task GetSiteSummaryRecursive(
+        string url,
+        SiteSummary summ,
+        HashSet<string> visitedUrls,
+        string? webhookUrl,
+        string? matchValue,
+        int maxLinks,
+        int currentCount = 0)
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var currentUri))
         {
             _logger.LogWarning("Недійсний URL: {Url}", url);
-            // Якщо webhookUrl надано, відправляємо Link з помилкою.
-            if (!string.IsNullOrEmpty(webhookUrl))
-            {
-                await SendWebhookAsync(webhookUrl, new Link { Url = url, Data = "Error: Invalid URL" });
-            }
+            return; // недійсні URL не збираємо
+        }
+
+        if (maxLinks > 0 && currentCount >= maxLinks)
+        {
+            _logger.LogInformation("Досягнуто ліміт посилань ({MaxLinks}) для URL {Url}", maxLinks, url);
             return;
         }
 
         string normalizedUrl = currentUri.AbsoluteUri.TrimEnd('/');
-
-        // Перевірка та додавання до відвіданих в одному виразі.
         if (!visitedUrls.Add(normalizedUrl))
         {
             _logger.LogInformation("URL {NormalizedUrl} вже був відвіданий. Пропуск рекурсії.", normalizedUrl);
@@ -118,6 +122,7 @@ public class ParserController : ControllerBase
         if (isExternalDomain)
         {
             link.Data = "Посилання на додаткові ресурси";
+            _logger.LogInformation("Посилання на додаткові ресурси. {NormalizedUrl}", normalizedUrl);
             if (!string.IsNullOrEmpty(webhookUrl))
             {
                 await SendWebhookAsync(webhookUrl, link);
@@ -137,66 +142,37 @@ public class ParserController : ControllerBase
                 var content = await response.Content.ReadAsStringAsync();
                 link.Data = TextCleaner.ExtractCleanTextFromHtml(content);
 
-                // Відправка або додавання Link об'єкта.
                 if (!string.IsNullOrEmpty(webhookUrl))
-                {
                     await SendWebhookAsync(webhookUrl, link);
-                }
                 else
-                {
                     summ.Links.Add(link);
-                }
 
                 var linksOnPage = HtmlLinkExtractor.ExtractAbsoluteLinksOnlyWithRegex(content, normalizedUrl);
                 if (linksOnPage != null && linksOnPage.Any())
                 {
-                    // Рекурсивні виклики тепер також виконуються паралельно за допомогою Task.WhenAll.
-                    var tasks = linksOnPage.Select(l => GetSiteSummaryRecursive(l, summ, visitedUrls, webhookUrl, matchValue)).ToList();
-                    await Task.WhenAll(tasks);
+                    foreach (var l in linksOnPage)
+                    {
+                        await GetSiteSummaryRecursive(l, summ, visitedUrls, webhookUrl, matchValue, maxLinks, summ.Links.Count);
+                    }
                 }
             }
             else
             {
-                link.Data = $"Error: {response.StatusCode}";
-                if (!string.IsNullOrEmpty(webhookUrl))
-                {
-                    await SendWebhookAsync(webhookUrl, link);
-                }
-                else
-                {
-                    summ.Links.Add(link);
-                }
                 _logger.LogError("HTTP Error для {NormalizedUrl}: {StatusCode}", normalizedUrl, response.StatusCode);
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Помилка обробки URL {NormalizedUrl}: {ErrorMessage}", normalizedUrl, ex.Message);
-            link.Data = $"Error: {ex.Message}";
-            if (!string.IsNullOrEmpty(webhookUrl))
-            {
-                await SendWebhookAsync(webhookUrl, link);
-            }
-            else
-            {
-                summ.Links.Add(link);
-            }
         }
     }
 
-    /// <summary>
-    /// Відправляє Link об'єкт на заданий URL вебхука.
-    /// </summary>
-    /// <param name="webhookUrl">URL вебхука.</param>
-    /// <param name="link">Об'єкт Link для відправки.</param>
     private async Task SendWebhookAsync(string webhookUrl, Link link)
     {
         try
         {
             var jsonContent = JsonConvert.SerializeObject(link);
             var httpContent = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
-
-            // Використовуємо _httpClient для відправки POST-запиту
             var response = await _httpClient.PostAsync(webhookUrl, httpContent);
 
             if (response.IsSuccessStatusCode)

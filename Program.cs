@@ -26,6 +26,8 @@ Log.Logger = new LoggerConfiguration()
 builder.Host.UseSerilog();
 // --- Кінець налаштування Serilog ---
 
+// Додаємо підтримку HttpClientFactory
+builder.Services.AddHttpClient();
 
 // Add services to the container.
 builder.Services.AddControllers();
