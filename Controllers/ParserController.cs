@@ -1,6 +1,4 @@
-﻿using System.Data;
-
-namespace WebParser.Controllers;
+﻿namespace WebParser.Controllers;
 
 [ApiController]
 [Route("parser")]
@@ -32,7 +30,8 @@ public class ParserController : ControllerBase
     public async Task<IActionResult> Get(
         [FromQuery] IEnumerable<string> urls,
         [FromQuery] string? webhookUrl = null,
-        [FromQuery] int maxLinks = 0) // новий параметр для обмеження кількості посилань
+        [FromQuery] int maxLinks = 0,
+        [FromQuery] bool isClean = true) // новий параметр для керування очищенням контенту
     {
         _logger.LogInformation("Отримано запит на парсинг URL-адрес: {Urls}", string.Join(", ", urls));
         if (!string.IsNullOrEmpty(webhookUrl))
@@ -62,7 +61,7 @@ public class ParserController : ControllerBase
                     var matchValue = _urlDomainRegex.Matches(url).FirstOrDefault()?.Groups[1].Value;
                     var summ = new SiteSummary { Url = url };
 
-                    await GetSiteSummaryRecursive(url, summ, visitedUrls, webhookUrl, matchValue, maxLinks);
+                    await GetSiteSummaryRecursive(url, summ, visitedUrls, webhookUrl, matchValue, maxLinks, isClean);
 
                     if (string.IsNullOrEmpty(webhookUrl))
                     {
@@ -97,6 +96,7 @@ public class ParserController : ControllerBase
         string? webhookUrl,
         string? matchValue,
         int maxLinks,
+        bool isClean,
         int currentCount = 0)
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var currentUri))
@@ -143,7 +143,11 @@ public class ParserController : ControllerBase
             if (response.IsSuccessStatusCode)
             {
                 var content = await response.Content.ReadAsStringAsync();
-                link.Data = TextCleaner.ExtractCleanTextFromHtml(content);
+
+                // Використання isClean
+                link.Data = isClean
+                    ? TextCleaner.ExtractCleanTextFromHtml(content)
+                    : content;
 
                 if (!string.IsNullOrEmpty(webhookUrl))
                     await SendWebhookAsync(webhookUrl, link);
@@ -155,7 +159,7 @@ public class ParserController : ControllerBase
                 {
                     foreach (var l in linksOnPage)
                     {
-                        await GetSiteSummaryRecursive(l, summ, visitedUrls, webhookUrl, matchValue, maxLinks, summ.Links.Count);
+                        await GetSiteSummaryRecursive(l, summ, visitedUrls, webhookUrl, matchValue, maxLinks, isClean, summ.Links.Count);
                     }
                 }
             }
@@ -221,3 +225,4 @@ public class ParserController : ControllerBase
         }
     }
 }
+
