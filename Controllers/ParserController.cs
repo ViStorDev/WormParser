@@ -14,6 +14,9 @@ public class ParserController : ControllerBase
 
     private string DomainNamePattern => _configuration?.GetValue<string>("FilterSettings:DomainNamePattern") ?? "";
 
+    // ⚡ новий параметр інтервалу (в секундах)
+    private static int _intervalSeconds = 0;
+
     public ParserController(IConfiguration configuration, ILogger<ParserController> logger)
     {
         _configuration = configuration;
@@ -31,12 +34,17 @@ public class ParserController : ControllerBase
         [FromQuery] IEnumerable<string> urls,
         [FromQuery] string? webhookUrl = null,
         [FromQuery] int maxLinks = 0,
-        [FromQuery] bool isClean = true) // новий параметр для керування очищенням контенту
+        [FromQuery] bool isClean = true,
+        [FromQuery] int intervalSeconds = 0) // ✅ новий параметр
     {
+        _intervalSeconds = intervalSeconds; // зберігаємо інтервал
+
         _logger.LogInformation("Отримано запит на парсинг URL-адрес: {Urls}", string.Join(", ", urls));
         if (!string.IsNullOrEmpty(webhookUrl))
         {
             _logger.LogInformation("Webhook URL для відправки Link об'єктів: {WebhookUrl}", webhookUrl);
+            if (_intervalSeconds > 0)
+                _logger.LogInformation("Використовується інтервал відправки вебхуків: {IntervalSeconds} сек.", _intervalSeconds);
         }
 
         var summaries = new List<SiteSummary>();
@@ -51,11 +59,10 @@ public class ParserController : ControllerBase
                 await _semaphore.WaitAsync();
                 try
                 {
-                    // Перевірка валідності стартового URL
                     if (!Uri.TryCreate(url, UriKind.Absolute, out var _))
                     {
                         _logger.LogWarning("Недійсний стартовий URL: {Url}", url);
-                        return; // недійсні URL пропускаються
+                        return;
                     }
 
                     var matchValue = _urlDomainRegex.Matches(url).FirstOrDefault()?.Groups[1].Value;
@@ -102,7 +109,7 @@ public class ParserController : ControllerBase
         if (!Uri.TryCreate(url, UriKind.Absolute, out var currentUri))
         {
             _logger.LogWarning("Недійсний URL: {Url}", url);
-            return; // недійсні URL не збираємо
+            return;
         }
 
         if (maxLinks > 0 && currentCount >= maxLinks)
@@ -144,7 +151,6 @@ public class ParserController : ControllerBase
             {
                 var content = await response.Content.ReadAsStringAsync();
 
-                // Використання isClean
                 link.Data = isClean
                     ? TextCleaner.ExtractCleanTextFromHtml(content)
                     : content;
@@ -180,6 +186,12 @@ public class ParserController : ControllerBase
         {
             var jsonContent = JsonConvert.SerializeObject(link);
             var httpContent = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+
+            if (_intervalSeconds > 0)
+            {
+                await Task.Delay(_intervalSeconds * 1000); // ⏳ додаємо паузу
+            }
+
             var response = await _httpClient.PostAsync(webhookUrl, httpContent);
 
             if (response.IsSuccessStatusCode)
