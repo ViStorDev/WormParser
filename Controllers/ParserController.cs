@@ -1,4 +1,6 @@
-﻿namespace WebParser.Controllers;
+﻿using System.Data;
+
+namespace WebParser.Controllers;
 
 [ApiController]
 [Route("parser")]
@@ -18,7 +20,8 @@ public class ParserController : ControllerBase
     {
         _configuration = configuration;
         _logger = logger;
-        _semaphore = new SemaphoreSlim(10, _configuration?.GetValue<int>("ParallelExecutions:MaxNumber") ?? 10);
+        var maxExec = _configuration?.GetValue<int>("ParallelExecutions:MaxNumber") ?? 10;
+        _semaphore = new SemaphoreSlim(maxExec, maxExec);
         _urlDomainRegex = new Regex(DomainNamePattern, RegexOptions.IgnoreCase);
     }
 
