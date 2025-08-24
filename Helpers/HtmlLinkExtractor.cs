@@ -2,127 +2,98 @@
 
 public static class HtmlLinkExtractor
 {
-    /// <summary>
-    /// Витягує унікальні абсолютні посилання (URL) з HTML-контенту,
-    /// включаючи специфічні відносні шляхи, які перетворюються на абсолютні URL.
-    /// Виключає посилання, що містять певні підрядки.
-    /// </summary>
+    // Читає filterConfig.txt, повертає список рядків
+    private static string[] LoadExcludedSubstrings()
+    {
+        try
+        {
+            string configPath = "filterConfig.txt";
+            if (!File.Exists(configPath))
+            {
+                // fallback для ASP.NET хостингу (AppContext.BaseDirectory)
+                var baseDirPath = Path.Combine(AppContext.BaseDirectory, "filterConfig.txt");
+                if (File.Exists(baseDirPath))
+                    configPath = baseDirPath;
+                else
+                {
+                    Console.WriteLine("⚠️ filterConfig.txt не знайдено ні в поточній директорії, ні в AppContext.BaseDirectory.");
+                    return Array.Empty<string>();
+                }
+            }
+
+            var lines = File.ReadAllLines(configPath);
+            var cleaned = lines
+                .Select(l => (l ?? string.Empty).Trim().TrimStart('\uFEFF', '\u200B'))
+                .Where(l => !string.IsNullOrWhiteSpace(l) && !l.StartsWith("#")) // дозволяємо коментарі
+                .ToArray();
+
+            return cleaned;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️ Помилка читання filterConfig.txt: {ex.Message}");
+            return Array.Empty<string>();
+        }
+    }
+
+    private static bool IsHttpOrHttps(Uri uri) =>
+        uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps;
+
     public static List<string> ExtractAbsoluteLinksOnlyWithRegex(string htmlContent, string baseUrl)
     {
-        Log.Information("Початок вилучення абсолютних посилань з HTML-контенту. Базовий URL: {BaseUrl}", baseUrl);
+        HashSet<string> uniqueLinks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        List<string> directAbsoluteLinks = new List<string>();
+        string[] excludedSubstrings = LoadExcludedSubstrings();
 
-        string[] excludedSubstrings = File.ReadAllLines("filterConfig.txt")
-            .Select(line => line.Trim())
-            .Where(line => !string.IsNullOrEmpty(line))
-            .ToArray();
-
-        // 1. Витягуємо абсолютні посилання через HtmlAgilityPack
-        var htmlDoc = new HtmlDocument();
+        var htmlDoc = new HtmlAgilityPack.HtmlDocument();
         htmlDoc.LoadHtml(htmlContent);
 
         var allHrefs = htmlDoc.DocumentNode
-            .SelectNodes("//a[@href] | //*[@src]") // і <a href>, і будь-які теги з src
-            ?.Select(node =>
-            {
-                string href = node.GetAttributeValue("href", null) ?? node.GetAttributeValue("src", null);
-                return href;
-            })
+            .SelectNodes("//a[@href] | //*[@src]")
+            ?.Select(node => node.GetAttributeValue("href", null) ?? node.GetAttributeValue("src", null))
             .Where(href => !string.IsNullOrEmpty(href))
             .ToList() ?? new List<string>();
 
         foreach (string foundUrl in allHrefs)
         {
-            string urlToAdd = foundUrl;
-
-            try
+            if (Uri.TryCreate(foundUrl, UriKind.Absolute, out Uri urlObj) && IsHttpOrHttps(urlObj))
             {
-                if (Uri.TryCreate(foundUrl, UriKind.Absolute, out Uri urlObj))
+                string cleaned = string.IsNullOrEmpty(urlObj.Fragment)
+                    ? urlObj.AbsoluteUri
+                    : urlObj.GetLeftPart(UriPartial.Path);
+
+                if (!excludedSubstrings.Any(sub => cleaned.Contains(sub, StringComparison.OrdinalIgnoreCase)))
                 {
-                    // видалення #fragment
-                    if (!string.IsNullOrEmpty(urlObj.Fragment))
-                    {
-                        urlToAdd = urlObj.GetLeftPart(UriPartial.Path);
-                        Log.Debug("Видалено фрагмент з URL: {OriginalUrl} -> {CleanedUrl}", foundUrl, urlToAdd);
-                    }
-                }
-                else
-                {
-                    continue; // ігноруємо невалідні абсолютні
+                    uniqueLinks.Add(cleaned.TrimEnd('/'));
                 }
             }
-            catch (Exception ex)
-            {
-                Log.Warning(ex, "Помилка парсингу URI '{FoundUrl}' в ExtractAbsoluteLinksOnlyWithRegex. Помилка: {Message}", foundUrl, ex.Message);
-                continue;
-            }
-
-            // Фільтрація за виключеннями
-            if (excludedSubstrings.Any(sub => urlToAdd.IndexOf(sub, StringComparison.OrdinalIgnoreCase) >= 0))
-            {
-                Log.Debug("Посилання '{Url}' відфільтровано через підрядок.", urlToAdd);
-                continue;
-            }
-
-            directAbsoluteLinks.Add(urlToAdd);
-            Log.Debug("Додано пряме абсолютне посилання: {Url}", urlToAdd);
         }
-        Log.Information("Знайдено {Count} прямих абсолютних посилань.", directAbsoluteLinks.Count);
 
-        // 2. Витягуємо відносні посилання та робимо їх абсолютними
-        List<string> relativeLinksAsAbsolute = ExtractSpecificRelativePaths(htmlContent, baseUrl);
-        Log.Information("Знайдено {Count} відносних посилань (перетворених на абсолютні).", relativeLinksAsAbsolute.Count);
-
-        // 3. Фільтруємо відносні посилання
-        HashSet<string> filteredRelativeLinks = new HashSet<string>();
-        foreach (string link in relativeLinksAsAbsolute)
+        var relativeLinks = ExtractSpecificRelativePaths(htmlContent, baseUrl);
+        foreach (var rel in relativeLinks)
         {
-            if (excludedSubstrings.Any(sub => link.IndexOf(sub, StringComparison.OrdinalIgnoreCase) >= 0))
-            {
-                Log.Debug("Відносне посилання '{Link}' відфільтровано.", link);
-                continue;
-            }
-            filteredRelativeLinks.Add(link);
+            if (!excludedSubstrings.Any(sub => rel.Contains(sub, StringComparison.OrdinalIgnoreCase)))
+                uniqueLinks.Add(rel.TrimEnd('/'));
         }
-        Log.Information("Після фільтрації залишилося {Count} відфільтрованих відносних посилань.", filteredRelativeLinks.Count);
 
-        // 4. Об’єднуємо
-        List<string> finalLinks = directAbsoluteLinks.Union(filteredRelativeLinks).ToList();
-        Log.Information("Завершено вилучення посилань. Загальна кількість унікальних посилань: {Count}", finalLinks.Count);
-
-        return finalLinks;
+        return uniqueLinks.ToList();
     }
 
-    /// <summary>
-    /// Витягує специфічні відносні шляхи з HTML-контенту та перетворює їх на абсолютні URL,
-    /// об'єднуючи з наданим базовим URL за допомогою класу Uri.
-    /// </summary>
     public static List<string> ExtractSpecificRelativePaths(string htmlContent, string baseUrl)
     {
-        Log.Information("Початок вилучення специфічних відносних шляхів. Базовий URL: {BaseUrl}", baseUrl);
-        HashSet<string> extractedPaths = new HashSet<string>();
+        HashSet<string> extractedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out Uri baseUriObject))
-        {
-            Log.Error("Недійсний базовий URL для ExtractSpecificRelativePaths: {BaseUrl}", baseUrl);
             return new List<string>();
-        }
 
         extractedPaths.Add(baseUriObject.AbsoluteUri.TrimEnd('/'));
-        Log.Debug("Додано базовий URL: {BaseUrl} до витягнутих шляхів.", baseUriObject.AbsoluteUri.TrimEnd('/'));
 
-        // Використаємо HtmlAgilityPack для відносних посилань
-        var htmlDoc = new HtmlDocument();
+        var htmlDoc = new HtmlAgilityPack.HtmlDocument();
         htmlDoc.LoadHtml(htmlContent);
 
         var relativeHrefs = htmlDoc.DocumentNode
             .SelectNodes("//a[@href] | //*[@src]")
-            ?.Select(node =>
-            {
-                string href = node.GetAttributeValue("href", null) ?? node.GetAttributeValue("src", null);
-                return href;
-            })
+            ?.Select(node => node.GetAttributeValue("href", null) ?? node.GetAttributeValue("src", null))
             .Where(href => !string.IsNullOrEmpty(href) && href.StartsWith("/"))
             .ToList() ?? new List<string>();
 
@@ -131,17 +102,12 @@ public static class HtmlLinkExtractor
             try
             {
                 Uri combinedUri = new Uri(baseUriObject, foundRelativePath);
-                string absoluteCombinedUri = combinedUri.AbsoluteUri.TrimEnd('/');
-                extractedPaths.Add(absoluteCombinedUri);
-                Log.Debug("Знайдено відносний шлях '{RelativePath}', об'єднано в '{AbsoluteUri}'", foundRelativePath, absoluteCombinedUri);
+                if (IsHttpOrHttps(combinedUri))
+                    extractedPaths.Add(combinedUri.AbsoluteUri.TrimEnd('/'));
             }
-            catch (UriFormatException ex)
-            {
-                Log.Warning(ex, "Помилка об'єднання URL: '{FoundRelativePath}' з '{BaseUrl}'.", foundRelativePath, baseUrl);
-            }
+            catch { /* ігноруємо невалідні */ }
         }
 
-        Log.Information("Завершено вилучення специфічних відносних шляхів. Знайдено {Count} унікальних шляхів.", extractedPaths.Count);
         return extractedPaths.ToList();
     }
 }

@@ -9,13 +9,14 @@ public class ParserController : ControllerBase
     private readonly Regex _urlDomainRegex;
     private readonly IConfiguration _configuration;
 
-    // Обмежувач паралельних запитів для запобігання перевантаженню.
     private static SemaphoreSlim _semaphore;
 
     private string DomainNamePattern => _configuration?.GetValue<string>("FilterSettings:DomainNamePattern") ?? "";
 
-    // ⚡ новий параметр інтервалу (в секундах)
-    private static int _intervalSeconds = 0;
+    private static int _sleepTime = 0;
+
+    // ✅ зберігаємо всі унікальні вже відправлені посилання
+    private static readonly HashSet<string> _sentLinks = new HashSet<string>();
 
     public ParserController(IConfiguration configuration, ILogger<ParserController> logger)
     {
@@ -35,21 +36,20 @@ public class ParserController : ControllerBase
         [FromQuery] string? webhookUrl = null,
         [FromQuery] int maxLinks = 0,
         [FromQuery] bool isClean = true,
-        [FromQuery] int intervalSeconds = 0) // ✅ новий параметр
+        [FromQuery] int sleepTime = 0)
     {
-        _intervalSeconds = intervalSeconds; // зберігаємо інтервал
+        _sleepTime = sleepTime;
 
         _logger.LogInformation("Отримано запит на парсинг URL-адрес: {Urls}", string.Join(", ", urls));
         if (!string.IsNullOrEmpty(webhookUrl))
         {
             _logger.LogInformation("Webhook URL для відправки Link об'єктів: {WebhookUrl}", webhookUrl);
-            if (_intervalSeconds > 0)
-                _logger.LogInformation("Використовується інтервал відправки вебхуків: {IntervalSeconds} сек.", _intervalSeconds);
+            if (_sleepTime > 0)
+                _logger.LogInformation("Використовується інтервал відправки вебхуків: {IntervalSeconds} сек.", _sleepTime);
         }
 
         var summaries = new List<SiteSummary>();
         var visitedUrls = new HashSet<string>();
-
         var tasks = new List<Task>();
 
         foreach (var url in urls)
@@ -87,7 +87,7 @@ public class ParserController : ControllerBase
         if (!string.IsNullOrEmpty(webhookUrl))
         {
             _logger.LogInformation("Запит на парсинг завершено (обробка вебхуків).");
-            return Ok("Webhook processing initiated. Links will be sent to the provided URL.");
+            return Ok("Webhook processing initiated. Unique links will be sent to the provided URL.");
         }
         else
         {
@@ -132,15 +132,11 @@ public class ParserController : ControllerBase
         if (isExternalDomain)
         {
             link.Data = "Посилання на додаткові ресурси";
-            _logger.LogInformation("Посилання на додаткові ресурси. {NormalizedUrl}", normalizedUrl);
             if (!string.IsNullOrEmpty(webhookUrl))
-            {
                 await SendWebhookAsync(webhookUrl, link);
-            }
             else
-            {
                 summ.Links.Add(link);
-            }
+
             return;
         }
 
@@ -169,10 +165,6 @@ public class ParserController : ControllerBase
                     }
                 }
             }
-            else
-            {
-                _logger.LogError("HTTP Error для {NormalizedUrl}: {StatusCode}", normalizedUrl, response.StatusCode);
-            }
         }
         catch (Exception ex)
         {
@@ -184,25 +176,28 @@ public class ParserController : ControllerBase
     {
         try
         {
-            var jsonContent = JsonConvert.SerializeObject(link);
-            var httpContent = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
-
-            if (_intervalSeconds > 0)
+            // ✅ Унікальність
+            lock (_sentLinks)
             {
-                await Task.Delay(_intervalSeconds * 1000); // ⏳ додаємо паузу
+                if (!_sentLinks.Add(link.Url))
+                {
+                    _logger.LogInformation("URL {Url} вже був відправлений раніше. Пропускаємо.", link.Url);
+                    return;
+                }
             }
 
+            if (_sleepTime > 0)
+                await Task.Delay(_sleepTime * 1000);
+
+            var jsonContent = JsonConvert.SerializeObject(link);
+            var httpContent = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
             var response = await _httpClient.PostAsync(webhookUrl, httpContent);
 
             if (response.IsSuccessStatusCode)
-            {
                 _logger.LogInformation("Успішно відправлено Link на вебхук {WebhookUrl} для URL: {LinkUrl}", webhookUrl, link.Url);
-            }
             else
-            {
                 _logger.LogWarning("Помилка відправки Link на вебхук {WebhookUrl} для URL {LinkUrl}: {StatusCode} - {ReasonPhrase}",
                     webhookUrl, link.Url, response.StatusCode, response.ReasonPhrase);
-            }
         }
         catch (Exception ex)
         {
@@ -219,17 +214,8 @@ public class ParserController : ControllerBase
             response.EnsureSuccessStatusCode();
             return response;
         }
-        catch (HttpRequestException ex)
-        {
-            _logger.LogWarning(ex, "HTTP Request Error fetching {Url}: {StatusCode} - {Message}", url, ex.StatusCode, ex.Message);
-            return new HttpResponseMessage(ex.StatusCode ?? System.Net.HttpStatusCode.BadRequest)
-            {
-                ReasonPhrase = ex.Message
-            };
-        }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Unexpected Error fetching {Url}: {Message}", url, ex.Message);
             return new HttpResponseMessage(System.Net.HttpStatusCode.InternalServerError)
             {
                 ReasonPhrase = ex.Message
